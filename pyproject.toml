@@ -1,0 +1,32 @@
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+# Mirrors `pythonpath` in pytest.ini, so `app`, `config` and the modules under
+# tests/ resolve as first-party imports instead of third-party ones.
+src = ["backend", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort (import sorting)
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.coverage.run]
+# The application package. tests/ is measured indirectly by what it imports.
+source = ["backend/app"]
+
+[tool.coverage.report]
+show_missing = true
+# Floor for total coverage; `pytest --cov` exits non-zero below it. The suite
+# measured 94.92% on 2026-11-18. Raise this when coverage rises, never lower it
+# to get a PR through: add the missing test instead.
+fail_under = 94

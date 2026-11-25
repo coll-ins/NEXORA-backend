@@ -1,0 +1,78 @@
+# Render blueprint: the API only. Postgres (Neon) and Redis (Upstash) are external.
+# No secret values live in this file. Every `sync: false` variable is asked for
+# in the Render dashboard the first time the blueprint is applied.
+# The frontend is deployed on Vercel (frontend/vercel.json), not here.
+services:
+  - type: web
+    name: nexora-api
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # `app` is a package, so the factory is app:create_app(). Workers and the 30 s
+    # timeout are in backend/gunicorn.conf.py.
+    startCommand: flask --app app db upgrade && gunicorn "app:create_app()"
+    # Runs the migrations before each new version starts (paid plans only; on a
+    # free plan run `flask --app app db upgrade` from the Render shell instead).
+    # preDeployCommand: flask --app app db upgrade
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8   # same minor as CI (.github/workflows/ci.yml)
+      - key: APP_ENV
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      # Neon connection string (postgresql://...); the app rewrites it to postgresql+psycopg://.
+      - key: DATABASE_URL
+        sync: false
+      # Shared rate-limit counters across both workers (memory:// is refused in production).
+      # Upstash Redis URL (rediss://...).
+      - key: RATELIMIT_STORAGE_URI
+        sync: false
+      # One proxy (Render's) sits in front of the app.
+      - key: TRUSTED_PROXIES
+        value: "1"
+      - key: CORS_ORIGINS        # the Vercel origin, e.g. https://nexora.vercel.app
+        sync: false
+      - key: FRONTEND_URL        # where emailed links point (the Vercel URL)
+        sync: false
+      - key: MAIL_BACKEND
+        value: smtp
+      - key: MAIL_FROM
+        sync: false
+      - key: MAIL_SERVER
+        sync: false
+      - key: MAIL_PORT
+        value: "587"
+      - key: MAIL_USERNAME
+        sync: false
+      - key: MAIL_PASSWORD
+        sync: false
+      # Help bot. Without the key the bot answers 503; nothing else is affected.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: ASSISTANT_DAILY_CAP   # keep below the free requests per day in AI Studio
+        value: "800"
+      # M-Pesa. Off until the Deployment section of README.md is complete.
+      - key: DARAJA_ENABLED
+        value: "0"
+      - key: DARAJA_ENV
+        value: sandbox
+      - key: DARAJA_ENCRYPTION_KEY
+        sync: false
+      - key: DARAJA_CALLBACK_URL
+        sync: false
+      - key: DARAJA_CALLBACK_TOKEN
+        sync: false
+      # Sandbox-only shared keys. Leave empty in production: never read there.
+      - key: DARAJA_CONSUMER_KEY
+        sync: false
+      - key: DARAJA_CONSUMER_SECRET
+        sync: false
+      - key: DARAJA_PASSKEY
+        sync: false
+      - key: DARAJA_SHORTCODE
+        sync: false

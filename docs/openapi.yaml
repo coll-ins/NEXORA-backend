@@ -1,0 +1,4996 @@
+openapi: 3.0.3
+info:
+  title: Nexora API
+  version: 1.2.0
+  description: 'Backend API for multi-tenant SACCO management. Every resource route is served under /api/v1;
+    the health check is unversioned.
+
+
+    **Errors** on every route: `{"error": {"code": "not_found", "message": "Not found."}}`. Codes: 400
+    validation_error, 401 unauthorized, 403 forbidden, 404 not_found, 405 method_not_allowed, 409 conflict,
+    413 payload_too_large, 423 locked, 429 rate_limited, 500 internal_error.
+
+
+    **Tenancy:** another SACCO''s records answer 404, never 403. A suspended SACCO answers 423.
+
+
+    **Money** is an integer in minor units (KES: 100 = 1.00). Money routes need a `reference` (idempotency
+    key).
+
+
+    **Pagination:** `page` from 1 and `per_page` (default 20, capped at 100); a bad value is 400.
+
+
+    **Auth:** `Authorization: Bearer <access_token>`. Access tokens last 15 minutes and stop working at
+    once after change-password, reset-password, logout-all or an email change.'
+servers:
+- url: http://localhost:5000
+  /api/v1/members/me/permissions:
+    get:
+      summary: The caller's job titles and permissions in one SACCO
+      description: '**Who:** a signed-in user. Without `sacco_id`, a platform owner
+        gets the platform permissions.
+
+
+        **Rate limit:** 120 per minute.'
+      parameters:
+      - name: sacco_id
+        in: query
+        required: false
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: The job titles held and the permissions they give.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  roles:
+                    type: array
+                    items:
+                      type: string
+                  permissions:
+                    type: array
+                    items:
+                      type: string
+        '400':
+          description: sacco_id missing or not a number (`validation_error`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not a member of that SACCO (`not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/savings/requests:
+    post:
+      summary: Send a deposit or withdrawal request
+      description: '**Who:** a member holding `savings.request`. A request changes no
+        balance.
+
+
+        **Rate limit:** 20 per minute.'
+      responses:
+        '201':
+          description: The pending request.
+        '200':
+          description: The same reference again returns the original request.
+        '400':
+          description: A field is missing or not acceptable (`validation_error`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: No `savings.request` in this SACCO (`forbidden`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: '`INSUFFICIENT_FUNDS` for a withdrawal above the balance,
+            `DUPLICATE_REFERENCE` for a reused reference.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The SACCO is suspended (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/savings/requests/me:
+    get:
+      summary: The caller's own requests in one SACCO
+      description: '**Who:** the member themselves. Newest first.
+
+
+        **Rate limit:** 120 per minute.'
+      parameters:
+      - name: sacco_id
+        in: query
+        required: true
+        schema:
+          type: integer
+      - name: kind
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - deposit
+          - withdrawal
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: '`{items, next}`; `next` is null on the last page.'
+        '404':
+          description: Not a member of that SACCO (`not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/savings/saccos/{sacco_id}/requests:
+    get:
+      summary: One SACCO's request queue
+      description: '**Who:** a member holding `savings.post`. Each item also names the
+        requester''s email.
+
+
+        **Rate limit:** 30 per minute.'
+      parameters:
+      - $ref: '#/components/parameters/sacco_id'
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - pending
+          - confirmed
+          - rejected
+      responses:
+        '200':
+          description: '`{items, next}`; newest first.'
+        '403':
+          description: No `savings.post` in this SACCO (`forbidden`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/savings/requests/{request_id}/confirm:
+    post:
+      summary: Confirm one pending request and post its ledger entry
+      description: '**Who:** a member holding `savings.post`, never the requester.
+
+
+        **Rate limit:** 20 per minute.
+
+
+        `reference` is required, except for a payment that carries an M-Pesa receipt (`source` `stk` or
+        `manual`): that posts under `mpesa-<receipt>` whatever is sent, so one receipt can reach the
+        ledger once. A **flagged** request (`flags` not empty) needs two different officers: the first
+        confirm records the first approval and answers the request still `pending` with
+        `awaiting_second_approval: true`; a second officer''s confirm posts it. The first approver
+        confirming again is 403 `SECOND_OFFICER_REQUIRED`. Flags are `large_amount`,
+        `manual_over_limit`, `repeated_amount`, `quick_withdrawal`.'
+      responses:
+        '200':
+          description: 'The request with `status: confirmed` and `ledger_transaction_id`, or, for the first approval of a flagged one, still `pending`.'
+        '403':
+          description: '`forbidden`, `OWN_REQUEST` when the officer asked for it, or `SECOND_OFFICER_REQUIRED`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: '`REQUEST_ALREADY_DECIDED`, or `INSUFFICIENT_FUNDS` for a withdrawal.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/savings/requests/{request_id}/reject:
+    post:
+      summary: Reject one pending request
+      description: '**Who:** a member holding `savings.post`, never the requester. A
+        reason is required; no balance changes.
+
+
+        **Rate limit:** 30 per minute.'
+      responses:
+        '200':
+          description: 'The request with `status: rejected` and `reject_reason`.'
+        '400':
+          description: No reason, or one longer than 500 characters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: '`REQUEST_ALREADY_DECIDED`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    request_id:
+      name: request_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    loan_id:
+      name: loan_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    sacco_id:
+      name: sacco_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    membership_id:
+      name: membership_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    account_id:
+      name: account_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    transaction_id:
+      name: transaction_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    page:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+      description: Page number.
+    per_page:
+      name: per_page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      description: Rows per page, capped at 100.
+    from:
+      name: from
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date
+      description: Inclusive start date, strictly YYYY-MM-DD (ASCII digits). Must not be after `to`.
+    to:
+      name: to
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date
+      description: Inclusive end date, YYYY-MM-DD.
+    action:
+      name: action
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 100
+      description: Exact action name, or a prefix ending in `.` such as `savings.`.
+  responses:
+    BadRequest:
+      description: Validation error (`validation_error`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing, invalid or expired access token (`unauthorized`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: 'Signed in but not allowed (`forbidden` or `NOT_ALLOWED`, `LOAN_SAME_OFFICER`).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Not found, including another SACCO's record (`not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: 'Conflicts with current state (`conflict`, `DUPLICATE_REFERENCE`, `INSUFFICIENT_FUNDS`,
+        `LOAN_NEEDS_APPROVAL`).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Locked:
+      description: The SACCO is suspended (`locked`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    SaccoRulesInput:
+      type: object
+      description: Amounts are whole cents (50000 = KES 500.00).
+      properties:
+        contribution_amount: {type: integer, minimum: 1, example: 50000}
+        contribution_frequency: {type: string, enum: [weekly, twice_monthly, monthly]}
+        loan_cap_multiple: {type: integer, minimum: 1, maximum: 10, default: 3, description: Times a member's savings they may borrow.}
+        interest_percent: {type: number, minimum: 0, maximum: 100, example: 10, description: "Required, no default. Recorded; NEXORA does not collect it yet."}
+        repayment_period_value: {type: integer, minimum: 1, example: 6}
+        repayment_period_unit: {type: string, enum: [days, months]}
+        late_fine_amount: {type: integer, minimum: 0, example: 5000, description: "Flat amount per late payment. Recorded; not charged yet."}
+        cycle_months: {type: integer, minimum: 9, maximum: 12, default: 12}
+        guarantors_required: {type: integer, minimum: 0, maximum: 10, default: 0, description: Recorded only.}
+        min_membership_days: {type: integer, minimum: 0, maximum: 730, default: 0}
+        exit_rules: {type: string, maxLength: 500}
+        loan_purposes: {type: string, maxLength: 200}
+      required: [contribution_amount, contribution_frequency, interest_percent, repayment_period_value, repayment_period_unit, late_fine_amount]
+    SaccoRules:
+      allOf:
+      - $ref: '#/components/schemas/SaccoRulesInput'
+      - type: object
+        properties:
+          id: {type: integer}
+          version: {type: integer}
+          cycle_starts_on: {type: string, format: date}
+          cycle_ends_on: {type: string, format: date}
+          locked: {type: boolean}
+          accepted: {type: boolean, nullable: true}
+    Loan:
+      type: object
+      properties:
+        id:
+          type: integer
+        sacco_id:
+          type: integer
+        membership_id:
+          type: integer
+        principal:
+          type: integer
+          description: Minor units.
+        term_months:
+          type: integer
+          nullable: true
+        required_approvals:
+          type: integer
+        approvals_count:
+          type: integer
+        repaid_total:
+          type: integer
+        status:
+          type: string
+          enum:
+          - requested
+          - approved
+          - rejected
+          - disbursed
+          - repaid
+        disbursed_by_membership_id:
+          type: integer
+          nullable: true
+        disbursed_at:
+          type: string
+          format: date-time
+          nullable: true
+        disbursement_transaction_id:
+          type: integer
+          nullable: true
+          description: The ledger row that paid the loan out. It cannot be reversed.
+        created_at:
+          type: string
+          format: date-time
+        sector:
+          type: string
+          nullable: true
+          enum: [agriculture, trade, manufacturing, transport, housing, education, health, other]
+          description: What the loan is for. Optional; set when the loan is requested.
+        disclosure_acknowledged_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the borrower confirmed they were shown the cost of the loan. Optional; recorded only.
+    SupportAccess:
+      type: object
+      properties:
+        id:
+          type: integer
+        sacco_id:
+          type: integer
+        requested_by_user_id:
+          type: integer
+        reason:
+          type: string
+        scope:
+          type: string
+          enum:
+          - audit
+          - members
+          - savings
+          - loans
+        status:
+          type: string
+          enum:
+          - requested
+          - approved
+          - denied
+          - revoked
+          - expired
+        decided_by_membership_id:
+          type: integer
+          nullable: true
+        decided_at:
+          type: string
+          format: date-time
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_by_membership_id:
+          type: integer
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    Owner:
+      type: object
+      properties:
+        user_id:
+          type: integer
+        email:
+          type: string
+    Settings:
+      type: object
+      properties:
+        sacco_id:
+          type: integer
+        loan_cap:
+          type: integer
+          description: Largest principal in minor units; 0 means no cap.
+        savings_multiple:
+          type: integer
+          description: A loan may be at most this many times the borrower's savings.
+        join_code_ttl_minutes:
+          type: integer
+        required_approvals:
+          type: integer
+          enum:
+          - 1
+          - 2
+    Roles:
+      type: object
+      properties:
+        membership_id:
+          type: integer
+        roles:
+          type: array
+          items:
+            type: string
+            enum:
+            - sacco_admin
+            - secretary
+            - finance_officer
+            - loans_officer
+            - member
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+          required:
+          - code
+          - message
+      required:
+      - error
+    Sacco:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        currency:
+          type: string
+          example: KES
+        status:
+          type: string
+          enum:
+          - active
+          - suspended
+        member_count:
+          type: integer
+          description: Active members. An invitation is not a member yet.
+        created_at:
+          type: string
+          format: date-time
+        registration_number:
+          type: string
+          nullable: true
+          example: CS/12345
+          description: Optional. 3 to 40 characters (letters, digits, space, `.` `/` `-`), unique among SACCOs in any case. Recorded as given, not checked with any register.
+        sasra_licence_number:
+          type: string
+          nullable: true
+          example: SASRA/DT/0042/2024
+          description: Optional. Same format and uniqueness as `registration_number`.
+        registration_date:
+          type: string
+          format: date
+          nullable: true
+          description: Optional, `YYYY-MM-DD`, from 1900-01-01 up to today.
+    Member:
+      type: object
+      properties:
+        id:
+          type: integer
+        user_id:
+          type: integer
+        email:
+          type: string
+        role:
+          type: string
+          enum:
+          - member
+          - staff
+          - sacco_admin
+        status:
+          type: string
+          enum:
+          - active
+          - inactive
+        created_at:
+          type: string
+          format: date-time
+    Profile:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        memberships:
+          type: array
+          items:
+            type: object
+            properties:
+              membership_id:
+                type: integer
+              sacco_id:
+                type: integer
+              role:
+                type: string
+              status:
+                type: string
+    Account:
+      type: object
+      properties:
+        id:
+          type: integer
+        membership_id:
+          type: integer
+        sacco_id:
+          type: integer
+        balance:
+          type: integer
+          description: Minor units.
+        created_at:
+          type: string
+          format: date-time
+    AccountRow:
+      type: object
+      properties:
+        account_id:
+          type: integer
+        membership_id:
+          type: integer
+        email:
+          type: string
+        balance:
+          type: integer
+    Posted:
+      type: object
+      properties:
+        id:
+          type: integer
+        account_id:
+          type: integer
+        type:
+          type: string
+          enum:
+          - deposit
+          - withdrawal
+        amount:
+          type: integer
+        reference:
+          type: string
+        balance:
+          type: integer
+          description: The account balance now (right after the entry when it is new; the current balance
+            on a replay).
+        created_at:
+          type: string
+          format: date-time
+        replayed:
+          type: boolean
+        source:
+          type: string
+          description: 'Present on a manual deposit: `manual`.'
+        request_id:
+          type: integer
+        mpesa_receipt:
+          type: string
+    Reversal:
+      type: object
+      properties:
+        id:
+          type: integer
+        reverses_id:
+          type: integer
+        account_id:
+          type: integer
+        type:
+          type: string
+          enum:
+          - deposit
+          - withdrawal
+        amount:
+          type: integer
+        reference:
+          type: string
+        balance:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        replayed:
+          type: boolean
+    Transaction:
+      type: object
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+          enum:
+          - deposit
+          - withdrawal
+        amount:
+          type: integer
+        reference:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        reverses_id:
+          type: integer
+          nullable: true
+    Summary:
+      type: object
+      properties:
+        sacco_id:
+          type: integer
+        from:
+          type: string
+          format: date
+          nullable: true
+        to:
+          type: string
+          format: date
+          nullable: true
+        account_count:
+          type: integer
+        total_balance:
+          type: integer
+        deposit_total:
+          type: integer
+        withdrawal_total:
+          type: integer
+        reversal_count:
+          type: integer
+    Activity:
+      type: object
+      properties:
+        membership_id:
+          type: integer
+        email:
+          type: string
+        account_id:
+          type: integer
+        transaction_count:
+          type: integer
+        last_transaction_at:
+          type: string
+          format: date-time
+          nullable: true
+    AuditEntry:
+      type: object
+      properties:
+        id:
+          type: integer
+        actor_id:
+          type: integer
+          nullable: true
+        action:
+          type: string
+        target:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+paths:
+  /api/health:
+    get:
+      summary: Health check (unversioned)
+      description: '**Who:** anyone.
+
+
+        **Rate limit:** 120 per minute. Each call opens a database connection.'
+      responses:
+        '200':
+          description: Database reachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                    - healthy
+                  database:
+                    type: string
+                    enum:
+                    - connected
+        '503':
+          description: Database not configured or unreachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  database:
+                    type: string
+                    enum:
+                    - not_configured
+                    - disconnected
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/register:
+    post:
+      summary: Register an account
+      description: '**Who:** anyone
+
+
+        **Rate limit:** 5 per minute (per IP).
+
+
+        The password must be 8 to 128 characters and must not contain the email. The address starts unverified;
+        login does not need it, but a SACCO admin can only add a verified user.'
+      responses:
+        '201':
+          description: Created. A verification link is emailed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  email:
+                    type: string
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflicts with current state (`conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  maxLength: 255
+                password:
+                  type: string
+                  maxLength: 128
+              required:
+              - email
+              - password
+  /api/v1/auth/join:
+    post:
+      summary: Join a SACCO with a code
+      description: |-
+        **Who:** a signed-in user holding a join code.
+
+        The code is six digits, valid for the SACCO's `join_code_ttl_minutes` (15 by default) and usable once. Five wrong entries burn it. Only a membership that is currently `invited` can be joined; a cancelled invite answers like a wrong code. A phone may be invited to several SACCOs: the code decides which one is joined, and a wrong code counts against every live code for that phone. On success the phone is linked to the user and a setup token (valid 10 minutes, tied to this code) is returned for setting the SACCO PIN; a re-invite makes older setup tokens invalid.
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phone: {type: string, maxLength: 20}
+                code: {type: string, minLength: 6, maxLength: 6}
+              required: [phone, code]
+      responses:
+        '200':
+          description: Phone linked. Send the setup token to the PIN route.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  setup_token: {type: string}
+                  membership_id: {type: integer}
+                required: [setup_token, membership_id]
+        '400': {description: "Wrong code or unknown phone (CODE_WRONG).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '401': {description: "Missing or invalid access token (unauthorized).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '409': {description: "Code already used or burned (CODE_USED), the phone belongs to another account, or the user is already a member.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '410': {description: "Code expired (CODE_EXPIRED).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {description: "Rate limit exceeded (rate_limited).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/v1/auth/join/pin:
+    post:
+      summary: Set the SACCO PIN and activate the membership
+      description: |-
+        **Who:** the signed-in user who just joined.
+
+        Sets a four-digit PIN (stored hashed). The membership changes from invited to active.
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                setup_token: {type: string}
+                pin: {type: string, minLength: 4, maxLength: 4}
+              required: [setup_token, pin]
+      responses:
+        '200':
+          description: PIN set, membership active.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  membership_id: {type: integer}
+                  status: {type: string, enum: [active]}
+                required: [membership_id, status]
+        '400': {description: "The PIN is not exactly four digits.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '401': {description: "Missing or invalid access token, or the setup token is invalid or expired.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {description: "The setup token belongs to someone else (NOT_ALLOWED).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '409': {description: "The membership is already set up.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {description: "Rate limit exceeded (rate_limited).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/v1/auth/join/rules:
+    post:
+      summary: The SACCO's rules, before the PIN step
+      description: |-
+        **Who:** the signed-in user who just joined (send the `setup_token` from `/auth/join`).
+
+        Returns every rule of the SACCO being joined, so the member can read them before accepting.
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                setup_token: {type: string}
+              required: [setup_token]
+      responses:
+        '200':
+          description: The current rules and whether this member accepted them (`rules` is null if the SACCO has none), plus the SACCO whose invitation is being read.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rules: {allOf: [{$ref: '#/components/schemas/SaccoRules'}], nullable: true}
+                  sacco:
+                    type: object
+                    nullable: true
+                    description: The SACCO the invitation belongs to, which the rules screen names.
+                    properties:
+                      id: {type: integer, example: 1}
+                      name: {type: string, example: Umoja SACCO}
+                    required: [id, name]
+        '401': {description: "Missing or invalid access token, or the setup token is invalid or expired.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {description: "The setup token belongs to someone else (NOT_ALLOWED).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/v1/auth/join/rules/accept:
+    post:
+      summary: Accept the SACCO's rules before joining
+      description: |-
+        **Who:** the signed-in user who just joined.
+
+        Records that this member accepted this version. `/auth/join/pin` answers 409 `RULES_NOT_ACCEPTED` until it is done.
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                setup_token: {type: string}
+                version: {type: integer, example: 1}
+              required: [setup_token, version]
+      responses:
+        '200':
+          description: Accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rules: {$ref: '#/components/schemas/SaccoRules'}
+        '401': {description: "Missing or invalid access token, or the setup token is invalid or expired.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {description: "The setup token belongs to someone else (NOT_ALLOWED).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '404': {description: "The SACCO has no rules to accept.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '409': {description: "The rules changed; read the current version first.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/v1/auth/join/rules/decline:
+    post:
+      summary: Decline the SACCO's rules and refuse the invitation
+      description: '**Who:** the signed-in user who just joined, after reading the rules.
+
+        `reason` is required and is kept for the officers of the SACCO, who see it on the member
+        (`decline_reason`). The membership becomes `declined` and is never activated: its join code is
+        spent, so declining ends the invitation, and an officer must invite the person again to restart.
+        Audited as `member.decline`. **Rate limit:** 30 per minute.'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                setup_token: {type: string}
+                version: {type: integer, example: 1, description: "The rules version that was read (required when the SACCO has rules)."}
+                reason: {type: string, maxLength: 500, description: "Why the invitation is refused, in the member's own words."}
+              required: [setup_token, reason]
+      responses:
+        '200':
+          description: '`{membership_id, status: declined}`.'
+        '400': {description: "The reason is missing or too long (validation_error).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '401': {description: "Missing or invalid access token, or the setup token is invalid or expired.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {description: "The setup token belongs to someone else, or the membership is already set up (NOT_ALLOWED).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '409': {description: "The rules changed; read the current version first.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/v1/auth/sacco-login:
+    post:
+      summary: Enter your SACCO with its PIN (the new name)
+      description: 'The same endpoint as `/auth/sacco-login`, kept under both names
+        for one release so older clients keep working.
+
+
+        **Rate limit:** 30 per minute.'
+      responses:
+        '200':
+          description: '`{ok, membership_id, role}`; no new tokens are issued.'
+        '401':
+          description: Wrong PIN (`PIN_WRONG`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: '`PIN_LOCKED` after five wrong tries, or the SACCO is suspended.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/sacco-login:
+    post:
+      summary: Check the SACCO PIN
+      description: |-
+        **Who:** a signed-in user with an active membership in the SACCO.
+
+        Five wrong PINs lock the PIN for 15 minutes (PIN_LOCKED).
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sacco_id: {type: integer}
+                pin: {type: string, minLength: 4, maxLength: 4}
+              required: [sacco_id, pin]
+      responses:
+        '200':
+          description: PIN correct.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {type: boolean}
+                  membership_id: {type: integer}
+                  role: {type: string}
+                required: [ok, membership_id, role]
+        '401': {description: "Missing or invalid access token, or wrong PIN (PIN_WRONG).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {description: "No active membership in that SACCO (NOT_ALLOWED).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '423': {description: "The PIN is locked (PIN_LOCKED).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {description: "Rate limit exceeded (rate_limited).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/v1/auth/login:
+    post:
+      summary: Sign in
+      description: '**Who:** anyone
+
+
+        **Rate limit:** 5 per minute (per IP).
+
+
+        Five failed logins lock the account for 15 minutes (423). A suspended SACCO does not block login:
+        the user sees it in GET /members/me/saccos, and the SACCO''s own endpoints answer 423.'
+      responses:
+        '200':
+          description: Token pair plus who signed in. Access token lasts 15 minutes, refresh token 7 days.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  refresh_token:
+                    type: string
+                  token_type:
+                    type: string
+                    enum:
+                    - Bearer
+                  user:
+                    allOf:
+                    - $ref: '#/components/schemas/Profile'
+                    - type: object
+                      properties:
+                        is_platform_owner:
+                          type: boolean
+                required:
+                - access_token
+                - refresh_token
+                - token_type
+                - user
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  maxLength: 255
+                password:
+                  type: string
+                  maxLength: 128
+              required:
+              - email
+              - password
+  /api/v1/auth/refresh:
+    post:
+      summary: Rotate a refresh token
+      description: '**Who:** anyone holding a refresh token
+
+
+        **Rate limit:** 30 per minute.
+
+
+        Each refresh token works once. Replaying a spent token more than 10 seconds later revokes all
+        of the user''s refresh tokens.'
+      responses:
+        '200':
+          description: A new token pair. Always store the newest refresh token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  refresh_token:
+                    type: string
+                  token_type:
+                    type: string
+                    enum:
+                    - Bearer
+                required:
+                - access_token
+                - refresh_token
+                - token_type
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token:
+                  type: string
+              required:
+              - refresh_token
+  /api/v1/auth/logout:
+    post:
+      summary: Revoke one refresh token
+      description: '**Who:** anyone holding a refresh token
+
+
+        **Rate limit:** 30 per minute.'
+      responses:
+        '200':
+          description: Logged out.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token:
+                  type: string
+              required:
+              - refresh_token
+  /api/v1/auth/logout-all:
+    post:
+      summary: End every session of the signed-in user
+      description: '**Who:** any signed-in user, even if their SACCO is suspended
+
+
+        **Rate limit:** 30 per minute.
+
+
+        Writes the audit row `auth.logout_all`.'
+      responses:
+        '200':
+          description: Every refresh token is revoked and every access token issued so far stops working,
+            including this one.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+  /api/v1/auth/change-password:
+    post:
+      summary: Change the signed-in user's password
+      description: '**Who:** any signed-in user, even if their SACCO is suspended
+
+
+        **Rate limit:** 5 per minute (per IP).
+
+
+        A wrong `current_password` is 401 and counts as a failed login (same lockout). The new password
+        follows the register rules and must differ from the current one. Writes the audit row `auth.password_change`.'
+      responses:
+        '200':
+          description: Password changed. All sessions end; sign in again.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                current_password:
+                  type: string
+                  maxLength: 128
+                new_password:
+                  type: string
+                  maxLength: 128
+              required:
+              - current_password
+              - new_password
+  /api/v1/auth/verify-email:
+    post:
+      summary: Confirm an email address
+      description: '**Who:** anyone holding the emailed token
+
+
+        **Rate limit:** 5 per minute (per IP).
+
+
+        The link is single-use and valid for 24 hours. 400 for a wrong, used or expired token.'
+      responses:
+        '200':
+          description: Verified.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+                  maxLength: 100
+              required:
+              - token
+  /api/v1/auth/resend-verification:
+    post:
+      summary: Send a new verification link
+      description: '**Who:** anyone
+
+
+        **Rate limit:** 5 per minute (per IP).
+
+
+        Replaces any earlier link for the user.'
+      responses:
+        '200':
+          description: Always the same answer, whether or not the address exists or needs verifying.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+              required:
+              - email
+  /api/v1/auth/forgot-password:
+    post:
+      summary: Email a password-reset link
+      description: '**Who:** anyone
+
+
+        **Rate limit:** 5 per minute (per IP).
+
+
+        The link lasts 1 hour and replaces any earlier reset link. This is also how an account locked
+        by repeated wrong guesses is recovered.'
+      responses:
+        '200':
+          description: Always the same answer, whether or not the address has an account.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+              required:
+              - email
+  /api/v1/auth/reset-password:
+    post:
+      summary: Set a new password from an emailed link
+      description: '**Who:** anyone holding the emailed token
+
+
+        **Rate limit:** 5 per minute (per IP).
+
+
+        The link works once. The new password follows the register rules. A successful reset also marks
+        the email verified, clears the lockout and revokes every session. A weak password is 400 and does
+        not spend the link. Writes the audit row `auth.password_reset`.'
+      responses:
+        '200':
+          description: Password reset. Every session ends; sign in with the new password.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+                  maxLength: 100
+                new_password:
+                  type: string
+                  maxLength: 128
+              required:
+              - token
+              - new_password
+  /api/v1/members/me:
+    get:
+      summary: The caller's own profile
+      description: '**Who:** any signed-in user
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: Profile with memberships.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+    patch:
+      summary: Change the caller's own email
+      description: '**Who:** any signed-in user
+
+
+        **Rate limit:** 30 per minute.
+
+
+        Needs `current_password`. A wrong one is 403 and counts toward the lockout. Only `email` can change.'
+      responses:
+        '200':
+          description: Updated profile. The new address is unverified, a link is emailed, and every session
+            ends (sign in again).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflicts with current state (`conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                current_password:
+                  type: string
+              required:
+              - email
+              - current_password
+  /api/v1/members/me/photo:
+    get:
+      summary: Read the caller's profile photo
+      description: >-
+        **Who:** the signed-in account owner. The photo is private to that account.
+
+
+        **Rate limit:** 120 per minute.
+      responses:
+        '200':
+          description: The caller's saved profile photo.
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        '204':
+          description: No profile photo has been saved.
+        '401':
+          description: Missing, invalid or expired access token (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+    put:
+      summary: Save the caller's profile photo
+      description: >-
+        **Who:** the signed-in account owner. Send a `photo` file using
+        `multipart/form-data`. JPEG, PNG and WebP images are accepted, up to 1.5 MB.
+
+
+        **Rate limit:** 30 per minute.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                photo:
+                  type: string
+                  format: binary
+              required:
+              - photo
+      responses:
+        '200':
+          description: The photo was saved to the caller's account.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  saved:
+                    type: boolean
+                required:
+                - saved
+        '400':
+          description: Missing, empty or unsupported image (`validation_error`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: The image is larger than 1.5 MB (`payload_too_large`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+    delete:
+      summary: Remove the caller's profile photo
+      description: '**Who:** the signed-in account owner.
+
+
+        **Rate limit:** 30 per minute.'
+      responses:
+        '200':
+          description: The photo was removed from the caller's account.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+                required:
+                - deleted
+        '401':
+          description: Missing, invalid or expired access token (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos:
+    get:
+      summary: List SACCOs
+      description: '**Who:** platform owner
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: All SACCOs.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  saccos:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Sacco'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+    post:
+      summary: Create a SACCO
+      description: '**Who:** platform owner
+
+
+        **Rate limit:** 30 per minute.
+
+
+        `currency` defaults to KES. The name is unique, up to 255 characters, with no control or zero-width
+        characters. Optional: `registration_number`, `sasra_licence_number`, `registration_date` (see the
+        Sacco schema); a bad value is 400 with the field named, a number already used by another SACCO is 409.'
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sacco'
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflicts with current state (`conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  maxLength: 255
+                currency:
+                  type: string
+                  minLength: 3
+                  maxLength: 3
+                  default: KES
+              required:
+              - name
+  /api/v1/saccos/{sacco_id}:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: Get a SACCO
+      description: '**Who:** any active member of the SACCO (`sacco.view`), or the platform owner
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: The SACCO.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sacco'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+    patch:
+      summary: Rename a SACCO or record its registration details
+      description: '**Who:** holders of `sacco.update` (the SACCO admin), or the platform owner
+
+
+        **Rate limit:** 30 per minute.
+
+
+        Send any of `name`, `registration_number`, `sasra_licence_number`, `registration_date`; nothing
+        else (400). `null` or an empty string clears a registration field. A bad value is 400 with
+        `error.fields`; a number another SACCO already uses is 409. Audited as `sacco.rename` and
+        `sacco.registration_update` (field names only, never the numbers).'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sacco'
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflicts with current state (`conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  maxLength: 255
+              required:
+              - name
+  /api/v1/saccos/{sacco_id}/activate:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    post:
+      summary: Set a SACCO active
+      description: '**Who:** platform owner
+
+
+        **Rate limit:** 30 per minute.
+
+
+        Suspending makes every endpoint of that SACCO answer 423 (reads and writes, joining and PIN
+        login); login, refresh, /members/me and /members/me/saccos keep working and show the status.'
+      responses:
+        '200':
+          description: The SACCO, now active.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sacco'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos/{sacco_id}/deactivate:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    post:
+      summary: Set a SACCO suspended
+      description: '**Who:** platform owner
+
+
+        **Rate limit:** 30 per minute.
+
+
+        Suspending makes every endpoint of that SACCO answer 423 (reads and writes, joining and PIN
+        login); login, refresh, /members/me and /members/me/saccos keep working and show the status.'
+      responses:
+        '200':
+          description: The SACCO, now suspended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sacco'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos/{sacco_id}/members:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: List a SACCO's members
+      description: '**Who:** platform owner, or an officer holding `member.view` (admin, secretary, loans
+        officer); members get 403
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: Members.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  members:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Member'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+    post:
+      summary: Add a registered user, or invite a phone, to a SACCO
+      description: '**Who:** holders of `member.manage` (the SACCO admin) or the platform owner; adding an admin needs `admin.manage` (platform owner only)
+
+
+        **Rate limit:** 30 per minute.
+
+
+        Two forms. **Email:** adds a registered user (status `active` or `inactive`; `invited` is 400).
+        404 if no user has that email; 409 if the user is already a member, or has not verified their
+        email yet. **Phone** (send `phone` and no `email`): creates an `invited` membership and answers 201
+        with a one-time `join_code` and `expires_at`, shown once; the person joins with
+        POST /auth/join. 409 if the phone was already invited to this SACCO. Every new membership
+        gets the job title its role implies (staff: secretary). **Email invite** (send `email`,
+        `role` and `invite: true`): creates an `invited` membership for that verified account
+        and emails it a one-time join code. The code is never in the response (it carries
+        `id`, `email`, `role`, `title`, `status` and `expires_at`); the person joins with
+        POST /auth/join sending only the `code`. Same 404 and 409 answers as the email form.'
+      responses:
+        '201':
+          description: Added.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflicts with current state (`conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  description: Email form. Send this or `phone`.
+                phone:
+                  type: string
+                  description: Phone form, for example +254700000123. Send this or `email`.
+                role:
+                  type: string
+                  enum:
+                  - member
+                  - staff
+                  - sacco_admin
+                  default: member
+                status:
+                  type: string
+                  description: Email form only.
+                  enum:
+                  - active
+                  - inactive
+                  default: active
+  /api/v1/saccos/{sacco_id}/members/{membership_id}:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    - $ref: '#/components/parameters/membership_id'
+    get:
+      summary: Get one member
+      description: '**Who:** platform owner, or an officer holding `member.view` (admin, secretary, loans
+        officer); members get 403
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: The member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+    patch:
+      summary: Change a member's role or status
+      description: '**Who:** holders of `member.manage` (the SACCO admin) or the platform owner; touching an admin needs `admin.manage` (platform owner only)
+
+
+        **Rate limit:** 30 per minute.
+
+
+        Send `role` and/or `status`. Writes an audit row. An active member never goes back to `invited`;
+        an inactive phone member can be invited again (`status: invited`), which answers with a fresh
+        `join_code` and kills the old ones. An invited or PIN-less phone member becomes active only by
+        joining with their code (409). Setting `inactive` kills unused join codes. Making or removing an admin moves
+        the `sacco_admin` title with the role.'
+      responses:
+        '200':
+          description: Updated member. A re-invite (`status` inactive -> invited) also returns
+            `join_code` and `expires_at`, shown once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflicts with current state (`conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:
+                  type: string
+                  enum:
+                  - member
+                  - staff
+                  - sacco_admin
+                status:
+                  type: string
+                  enum:
+                  - active
+                  - inactive
+                  - invited
+  /api/v1/savings/accounts:
+    post:
+      summary: Open a savings account for a member
+      description: '**Who:** a member of this SACCO holding `savings.post` (SACCO admin or finance officer)
+
+
+        **Rate limit:** 30 per minute.
+
+
+        404 for a membership in another SACCO or one that does not exist (same body).'
+      responses:
+        '201':
+          description: Opened.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflicts with current state (`conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                membership_id:
+                  type: integer
+              required:
+              - membership_id
+  /api/v1/savings/accounts/me:
+    get:
+      summary: The caller's own accounts
+      description: '**Who:** any signed-in user
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: 'Accounts across the caller''s active memberships in active SACCOs (a list: a user
+            may belong to several SACCOs).'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accounts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Account'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+  /api/v1/savings/accounts/{account_id}:
+    parameters:
+    - $ref: '#/components/parameters/account_id'
+    get:
+      summary: Get one account and its balance
+      description: '**Who:** the account''s owner, `savings.view_all` (SACCO admin, secretary, finance officer), platform owner
+
+
+        **Rate limit:** 120 per minute.
+
+
+        A member can read only their own account; another member''s account is 404.'
+      responses:
+        '200':
+          description: The account. `balance` is derived from the ledger.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+  /api/v1/savings/accounts/{account_id}/deposits:
+    parameters:
+    - $ref: '#/components/parameters/account_id'
+    post:
+      summary: Record a manual deposit from an M-Pesa receipt
+      description: '**Who:** a member of this SACCO holding `savings.post` (SACCO admin or finance officer)
+
+
+        **Rate limit:** 20 per minute.
+
+
+        A manual deposit needs `amount` (minor units), `mpesa_receipt` (the code from the M-Pesa message,
+        8 to 12 capital letters and digits) and `phone` (the payer). The ledger row is marked `source:
+        manual`. One receipt is one payment per SACCO: recording it again with the same amount is a retry
+        (**200**, `replayed: true`); any other repeat, or a receipt an M-Pesa callback already recorded,
+        is 409 `DUPLICATE_RECEIPT`. A later callback for a receipt entered here is linked to it, not
+        added. A **flagged** deposit (a manual entry at or over the SACCO''s limit, a large amount, or
+        the same amount again and again) is not posted: it answers **202** `{queued: true, request}` with
+        this officer''s first approval, and a different officer confirms it in the request queue. Holders
+        of `savings.post` post money, others cannot (403), and nobody may post on their own account (403).
+        Amounts are integers in minor units.'
+      responses:
+        '201':
+          description: 'New entry (`source: manual`, with `request_id` and `mpesa_receipt`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posted'
+        '202':
+          description: 'Flagged: `{queued: true, request}`. Nothing is posted yet.'
+        '200':
+          description: Retry of the same receipt entered earlier.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posted'
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflicts with current state (`conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount:
+                  type: integer
+                  minimum: 1
+                  maximum: 100000000
+                  description: 'Minor units (KES: 100 = 1.00). Integers only.'
+                reference:
+                  type: string
+                  pattern: ^[A-Za-z0-9._:-]{1,64}$
+                  description: Required idempotency key, unique per SACCO.
+              required:
+              - amount
+              - reference
+  /api/v1/savings/accounts/{account_id}/withdrawals:
+    parameters:
+    - $ref: '#/components/parameters/account_id'
+    post:
+      summary: Post a withdrawal
+      description: '**Who:** a member of this SACCO holding `savings.post` (SACCO admin or finance officer)
+
+
+        **Rate limit:** 20 per minute.
+
+
+        Insufficient funds is 409 `Insufficient funds.`. `reference` is required. A new entry answers
+        **201**; repeating the same reference with the same request answers **200** with `replayed: true`;
+        the same reference with a different request is 409. Holders of `savings.post` (admin, finance officer) post money, others cannot
+        (403), and nobody may post on their own account (403). A withdrawal that is **flagged** (large, the same amount again and again, or soon after a deposit; see `deposit-controls`) is 409 `NEEDS_SECOND_APPROVAL`: it goes through the member''s withdrawal request, which two officers approve. A withdrawal that would leave the savings below the loan cap of an open loan is 409 `LOAN_OVER_CAP` (SACCOs with published rules). Amounts are integers in minor units.'
+      responses:
+        '201':
+          description: New entry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posted'
+        '200':
+          description: Replay of an earlier request with the same reference.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posted'
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflicts with current state (`conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount:
+                  type: integer
+                  minimum: 1
+                  maximum: 100000000
+                  description: 'Minor units (KES: 100 = 1.00). Integers only.'
+                reference:
+                  type: string
+                  pattern: ^[A-Za-z0-9._:-]{1,64}$
+                  description: Required idempotency key, unique per SACCO.
+              required:
+              - amount
+              - reference
+  /api/v1/savings/accounts/{account_id}/transactions:
+    parameters:
+    - $ref: '#/components/parameters/account_id'
+    get:
+      summary: An account's ledger history, newest first
+      description: '**Who:** the account''s owner, `savings.view_all` (SACCO admin, secretary, finance officer), platform owner
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: A page of entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transactions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transaction'
+                  page:
+                    type: integer
+                  per_page:
+                    type: integer
+                  total:
+                    type: integer
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/page'
+      - $ref: '#/components/parameters/per_page'
+  /api/v1/savings/transactions/{transaction_id}/reversals:
+    parameters:
+    - $ref: '#/components/parameters/transaction_id'
+    post:
+      summary: Ask for a reversal of a ledger entry (first of two officers)
+      description: '**Who:** a member of this SACCO holding `savings.reverse` (SACCO admin or finance officer)
+
+
+        **Rate limit:** 20 per minute.
+
+
+        Reversals take two officers (maker-checker). This call only **asks**: send `reason` (10 to 140
+        characters, one line). Nothing is posted; a different officer approves with
+        `POST /savings/reversal-requests/{request_id}/approve`. Nobody may ask to reverse an entry on their
+        own account (403). An entry that is itself a reversal, a loan entry, or one already reversed is
+        409. One request may be open per entry: the same officer asking again gets the same request
+        (**200**); another officer gets 409.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: {type: string, minLength: 10, maxLength: 140}
+              required: [reason]
+      responses:
+        '201':
+          description: 'The request: `{id, sacco_id, transaction_id, account_id, type, amount, requested_by, reason, status: pending, ...}`.'
+        '200':
+          description: The same officer already has this request open.
+        '400':
+          description: A missing or malformed reason (`validation_error`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Already reversed, a reversal, a loan entry, or another officer's request is open.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+  /api/v1/savings/saccos/{sacco_id}/reversal-requests:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: This SACCO's reversal requests
+      description: '**Who:** a member holding `savings.reverse`. Newest first, at most 100. `?status=` is
+        `pending`, `approved` or `rejected`.
+
+
+        **Rate limit:** read limit.'
+      responses:
+        '200':
+          description: '`{items: [request]}`.'
+        '400':
+          description: Unknown status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security:
+      - bearerAuth: []
+  /api/v1/savings/reversal-requests/{request_id}/approve:
+    parameters:
+    - $ref: '#/components/parameters/request_id'
+    post:
+      summary: Approve a reversal request (the second officer) and append the entry
+      description: '**Who:** a member holding `savings.reverse`, never the officer who asked (403
+        `SECOND_OFFICER_REQUIRED`).
+
+
+        **Rate limit:** 20 per minute.
+
+
+        Send `reference` (the idempotency key). The opposite entry is appended now, with the same rules as
+        before: nobody reverses an entry on their own account, a reversal that would take the balance below
+        zero is 409, and one that would leave savings below an open loan''s cap is 409 `LOAN_OVER_CAP`. A
+        SACCO admin (`savings.reverse_override`) may force that one by sending `override_reason` (10 to 140
+        characters, one line); it is audited as `savings.reverse_override`. A retried approval with the same
+        `reference` answers **200** with `replayed: true`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reference: {type: string}
+                override_reason: {type: string, minLength: 10, maxLength: 140}
+              required: [reference]
+      responses:
+        '201':
+          description: The new opposite entry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reversal'
+        '200':
+          description: Replay of an approval that already went through.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reversal'
+        '400':
+          description: Validation error (`validation_error`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: '`forbidden`, `SECOND_OFFICER_REQUIRED`, or an override without `savings.reverse_override`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: '`REQUEST_ALREADY_DECIDED`, `LOAN_OVER_CAP`, `INSUFFICIENT_FUNDS`, or the entry was reversed meanwhile.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+  /api/v1/savings/reversal-requests/{request_id}/reject:
+    parameters:
+    - $ref: '#/components/parameters/request_id'
+    post:
+      summary: Reject a reversal request (a different officer)
+      description: '**Who:** a member holding `savings.reverse`, never the officer who asked (403
+        `SECOND_OFFICER_REQUIRED`). Send `reason` (10 to 140 characters). Nothing is posted.
+
+
+        **Rate limit:** 30 per minute.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: {type: string, minLength: 10, maxLength: 140}
+              required: [reason]
+      responses:
+        '200':
+          description: 'The request with `status: rejected`.'
+        '400':
+          description: A missing or malformed reason.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: '`REQUEST_ALREADY_DECIDED`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+  /api/v1/admin/saccos/{sacco_id}/reports/summary:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    - $ref: '#/components/parameters/from'
+    - $ref: '#/components/parameters/to'
+    get:
+      summary: SACCO totals
+      description: '**Who:** `report.view` (SACCO admin, secretary, finance or loans officer), platform owner
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: Totals. `deposit_total` and `withdrawal_total` leave out reversed entries and reversals;
+            `from`/`to` filter the totals, not the balance.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Summary'
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+  /api/v1/admin/saccos/{sacco_id}/reports/member-activity:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: Per-member activity
+      description: '**Who:** `report.view` (SACCO admin, secretary, finance or loans officer), platform owner
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: 'A page of members. No `total`: keep paging until a page is shorter than `per_page`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  members:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Activity'
+                  page:
+                    type: integer
+                  per_page:
+                    type: integer
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/page'
+      - $ref: '#/components/parameters/per_page'
+  /api/v1/admin/saccos/{sacco_id}/accounts:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: List a SACCO's accounts with balances
+      description: '**Who:** `savings.view_all` (SACCO admin, secretary, finance officer), platform owner
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: A page of accounts.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accounts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AccountRow'
+                  page:
+                    type: integer
+                  per_page:
+                    type: integer
+                  total:
+                    type: integer
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/page'
+      - $ref: '#/components/parameters/per_page'
+  /api/v1/admin/saccos/{sacco_id}/audit:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: A SACCO's audit log, newest first
+      description: '**Who:** the secretary (`audit.view`) or the platform owner. The SACCO admin gets 403.
+
+
+        **Rate limit:** 120 per minute.
+
+
+        Read-only. Every query is filtered by SACCO.'
+      responses:
+        '200':
+          description: A page of audit rows.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditEntry'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  per_page:
+                    type: integer
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found, **including another SACCO's record** (`not_found`). Never 403 for tenant
+            isolation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The user's SACCO is suspended, or the account is locked (`locked`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/page'
+      - $ref: '#/components/parameters/per_page'
+      - $ref: '#/components/parameters/action'
+      - $ref: '#/components/parameters/from'
+      - $ref: '#/components/parameters/to'
+  /api/v1/admin/audit:
+    get:
+      summary: The platform audit log, newest first
+      description: '**Who:** platform owner only
+
+
+        **Rate limit:** 120 per minute.
+
+
+        Optional `sacco_id` filter. Rows with no SACCO (such as `auth.password_change`) appear only here.'
+      responses:
+        '200':
+          description: A page of audit rows.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditEntry'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  per_page:
+                    type: integer
+        '400':
+          description: Validation error (`validation_error`). Also bad paging or dates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing, invalid or expired access token, or wrong credentials (`unauthorized`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Signed in but not allowed: wrong role or inactive membership (`forbidden`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/page'
+      - $ref: '#/components/parameters/per_page'
+      - $ref: '#/components/parameters/action'
+      - $ref: '#/components/parameters/from'
+      - $ref: '#/components/parameters/to'
+      - name: sacco_id
+        in: query
+        schema:
+          type: integer
+  /api/v1/savings/accounts/{account_id}/interest:
+    parameters:
+    - $ref: '#/components/parameters/account_id'
+    post:
+      summary: Credit interest
+      description: '**Who:** admin or finance officer (`savings.post`). Same reference rules as deposits.'
+      responses:
+        '201':
+          description: New entry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posted'
+        '200':
+          description: Replay of the same request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount:
+                  type: integer
+                  minimum: 1
+                  description: Minor units. Integers only.
+                reference:
+                  type: string
+                  pattern: ^[A-Za-z0-9._:-]{1,64}$
+                  description: Required idempotency key, unique per SACCO.
+              required:
+              - amount
+              - reference
+  /api/v1/savings/accounts/{account_id}/fees:
+    parameters:
+    - $ref: '#/components/parameters/account_id'
+    post:
+      summary: Charge a fee
+      description: '**Who:** admin or finance officer (`savings.post`). Same reference rules as deposits.'
+      responses:
+        '201':
+          description: New entry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posted'
+        '200':
+          description: Replay of the same request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Posted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount:
+                  type: integer
+                  minimum: 1
+                  description: Minor units. Integers only.
+                reference:
+                  type: string
+                  pattern: ^[A-Za-z0-9._:-]{1,64}$
+                  description: Required idempotency key, unique per SACCO.
+              required:
+              - amount
+              - reference
+  /api/v1/saccos/{sacco_id}/members/{membership_id}/roles:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    - $ref: '#/components/parameters/membership_id'
+    get:
+      summary: A member's job titles
+      description: '**Who:** holders of `member.manage` (the SACCO admin), or the platform owner.'
+      responses:
+        '200':
+          description: The titles held.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Roles'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+    put:
+      summary: Set a member's job titles
+      description: '**Who:** holders of `member.manage` (the SACCO admin), or the platform owner. Replaces the whole list. Only the
+        platform owner edits an admin''s titles; nobody changes their own titles; the membership must
+        be active (409). `sacco_admin` follows the SACCO admin role: keep it on an admin and leave it
+        off everyone else (409), and make or remove admins with PATCH /saccos/{sacco_id}/members/{membership_id},
+        which moves the title with the role.'
+      responses:
+        '200':
+          description: The titles now held.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Roles'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                roles:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+              required:
+              - roles
+  /api/v1/saccos/{sacco_id}/rules:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: The SACCO's rules
+      description: '**Who:** any active member (`sacco.view`), or the platform owner. `rules` is null until a SACCO has published rules. `accepted` says whether the caller accepted the current version (null for a platform owner). The rules are locked while `locked` is true.'
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: The current rules.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rules: {allOf: [{$ref: '#/components/schemas/SaccoRules'}], nullable: true}
+        '401': {description: "Unauthorized.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {description: "Forbidden.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '404': {description: "Not found.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    post:
+      summary: Publish the SACCO's first rules
+      description: |-
+        **Who:** the SACCO admin (`sacco.update`) or the platform owner.
+
+        Only the first version. After that the rules are locked until the cycle ends (409 `RULES_LOCKED`) and change only by member vote. Amounts are whole cents. `interest_percent` has no default and must be sent. `loan_cap_multiple` defaults to 3 and `cycle_months` to 12. Every 400 carries `error.fields`, a plain-words reason for each bad field.
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SaccoRulesInput'}
+      responses:
+        '201':
+          description: Published, version 1, cycle starts today.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rules: {$ref: '#/components/schemas/SaccoRules'}
+        '400': {description: "A rule is missing or not valid (error.fields).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '401': {description: "Unauthorized.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {description: "Forbidden.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '404': {description: "Not found.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '409': {description: "The SACCO already has rules, locked or awaiting a vote (RULES_LOCKED).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/v1/saccos/{sacco_id}/rules/accept:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    post:
+      summary: Accept the current rules
+      description: '**Who:** an active member. Send the `version` you read. Idempotent.'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version: {type: integer, example: 1}
+              required: [version]
+      responses:
+        '200':
+          description: Accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rules: {$ref: '#/components/schemas/SaccoRules'}
+        '401': {description: "Unauthorized.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {description: "Only members accept rules.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '404': {description: "Not found, or no rules yet.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '409': {description: "The rules changed; read the current version.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/v1/saccos/{sacco_id}/payment-details:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: Where members pay in
+      description: '**Who:** any active member of the SACCO (`sacco.view`), or the platform owner. Returns
+        `details` (the live values, or `null` when the SACCO has not set any) and `pending` (the change
+        waiting for a second officer, or `null`). `pending` is only filled for holders of `payin.manage`;
+        a member never sees a change before it is live. An approval by a second officer takes effect at
+        once, so there is no window between approval and the values members see: `updated_at` is that approval.
+        `bank_manual_confirm_only` is true when the bank uses a shared paybill.
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: '`{details, pending}`. Members never get a pending change.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos/{sacco_id}/payment-details/changes:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    post:
+      summary: Propose new pay-in details
+      description: '**Who:** holders of `payin.manage` (the SACCO admin and the finance officer). Changes
+        nothing members see: the change waits until a different officer approves it. A newer proposal replaces
+        the one waiting. Give M-Pesa details, bank details or both. M-Pesa: `mpesa_type` (`paybill`, `till` or `pochi`),
+        `mpesa_number` (5 to 7 digits; for `pochi` a Safaricom phone number, shown to members but never prompted), `display_name`, optional `account_reference_hint` (paybill only). Bank:
+        `bank_name`, `bank_account_name`, `bank_account_number` (6 to 20 digits), optional `bank_branch`. Shared
+        bank paybill: `bank_uses_shared_paybill` true with `bank_paybill_number` (5 to 7 digits). Every proposal
+        is audited (`payin.propose`, `payin.supersede`) and every officer is emailed. Text fields take Latin
+        letters, ASCII digits and ordinary punctuation on one line (invisible, look-alike and
+        non-Latin letters are refused). A SACCO may send 10 proposals an hour (429).
+
+
+        **Rate limit:** 30 per minute.'
+      responses:
+        '201':
+          description: '`{change}` with `status: pending`.'
+        '400':
+          description: A field is not valid. `error.fields` names each one with its format, an example and the reason.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: These are the details members already see (`conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          $ref: '#/components/responses/Locked'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mpesa_type:
+                  type: string
+                  enum:
+                  - paybill
+                  - till
+                  - pochi
+                mpesa_number:
+                  type: string
+                display_name:
+                  type: string
+                account_reference_hint:
+                  type: string
+                bank_name:
+                  type: string
+                bank_account_name:
+                  type: string
+                bank_account_number:
+                  type: string
+                bank_branch:
+                  type: string
+                bank_uses_shared_paybill:
+                  type: boolean
+                bank_paybill_number:
+                  type: string
+  /api/v1/saccos/{sacco_id}/payment-details/changes/{change_id}/approve:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    - name: change_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    post:
+      summary: Approve a waiting change, which puts it live at once
+      description: '**Who:** holders of `payin.manage`, never the officer who proposed the change
+        (403 `PAYIN_SAME_OFFICER`). The change is named by id, so nobody approves values that changed
+        after they read them. The approver must have become an officer before the change was proposed
+        (403 `PAYIN_NEW_OFFICER`), and the proposer must still be an officer (409). Officer since is the
+        earliest `granted_at` of a title that carries `payin.manage` (editing other titles keeps it);
+        an admin with no title rows counts from when the membership was created. Audited as
+        `payin.approve`. The approval is the moment it takes effect: the values members see change in the
+        same request, with no waiting period. Every officer (the admin included) is emailed, without the
+        numbers, and members get no email. Everyone is also emailed when someone gains
+        `payin.manage` (member add, role or title change).
+
+
+        **Rate limit:** 30 per minute.'
+      responses:
+        '200':
+          description: '`{change}` with `status: approved`, `approved_at` and `go_live_at` (the same moment). Members see the new details from now on.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Not allowed, you proposed this change (`PAYIN_SAME_OFFICER`), or you became an officer after it was proposed (`PAYIN_NEW_OFFICER`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The change was already approved or replaced, or its proposer is no longer an officer (`conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          $ref: '#/components/responses/Locked'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos/{sacco_id}/rules/proposals:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: Proposed rule changes
+      description: '**Who:** any active member. The ten newest, with the vote count and the caller''s own vote.'
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: Proposals.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  proposals: {type: array, items: {type: object}}
+        '401': {description: "Unauthorized.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {description: "Forbidden.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '404': {description: "Not found.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    post:
+      summary: Propose a rule change
+      description: '**Who:** the SACCO admin or the platform owner, only after the cycle has ended (409 `RULES_LOCKED` before). Send the full set of rules. One open proposal at a time.'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SaccoRulesInput'}
+      responses:
+        '201':
+          description: Open for a vote.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  proposal: {type: object}
+        '400': {description: "A rule is missing or not valid (error.fields).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '401': {description: "Unauthorized.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {description: "Forbidden.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '404': {description: "Not found.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '409': {description: "Still locked, nothing to change yet, a proposal is already open, nobody has accepted the current rules, or fewer than half of all active members have (the change could not pass).", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/v1/saccos/{sacco_id}/rules/proposals/{proposal_id}/votes:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    - name: proposal_id
+      in: path
+      required: true
+      schema: {type: integer}
+    post:
+      summary: Vote on a proposed change
+      description: '**Who:** an active member. More than half of ALL active members counted when it was proposed (not only those who accepted the rules) must approve; then it is adopted as the next version and starts a new cycle. The acceptance of members who voted yes carries over to the new version; members who voted no, or did not vote, must accept it again before they can ask for a loan. It is rejected once it can no longer win. A member may change their vote while it is open.'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                approve: {type: boolean}
+              required: [approve]
+      responses:
+        '200':
+          description: The proposal with its tally.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  proposal: {type: object}
+        '400': {description: "approve must be true or false.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '401': {description: "Unauthorized.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {description: "Only members vote.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '404': {description: "Not found.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '409': {description: "Voting has closed.", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/v1/saccos/{sacco_id}/members/me/data-consent:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: The data-protection wording and my consent
+      description: '**Who:** an active member of the SACCO. Returns `notice` (`version`, `purpose`, `text`) and
+        `consent` (`purpose`, `notice_version`, `granted_at`, or `null`).
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: '`{notice, consent}`.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+    post:
+      summary: Agree to NEXORA keeping my personal details
+      description: '**Who:** the member, for themself only (nobody can consent for someone else). Send the
+        `notice_version` you read; another version is 409. Personal details (full name, national ID,
+        gender, date of birth) can be stored only while this consent is active. Repeating it returns the
+        existing consent (200). Audited as `consent.grant`.
+
+
+        **Rate limit:** 30 per minute.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                notice_version: {type: integer, example: 1}
+              required: [notice_version]
+      responses:
+        '201':
+          description: '`{consent}`: new.'
+        '200':
+          description: '`{consent}`: already given.'
+        '400':
+          description: '`notice_version` missing or not a whole number.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The wording changed since the member read it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos/{sacco_id}/members/me/data-consent/withdraw:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    post:
+      summary: Withdraw consent; my personal details are erased
+      description: '**Who:** the member. Works for the member''s own membership whatever its status, even after deactivation or suspension. Ends the consent and erases full name, national ID, gender and date of
+        birth at once. Savings, loans, share capital and the audit trail stay. Audited as
+        `consent.withdraw` with the names of the erased fields, never the values.
+
+
+        **Rate limit:** 30 per minute.'
+      responses:
+        '200':
+          description: '`{consent: null, erased: [field names]}`.'
+        '409':
+          description: No active consent to withdraw.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos/{sacco_id}/members/{membership_id}/profile:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    - name: membership_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    get:
+      summary: A member's personal details, share capital and consent
+      description: '**Who:** the member themself, or a holder of `member.manage` (the SACCO admin). Nobody
+        else, the platform owner included. Personal details never appear in the member list.
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: '`{membership_id, full_name, national_id, gender, date_of_birth, share_capital, consent}`. Every field can be `null`.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+    patch:
+      summary: Set a member's personal details or share capital
+      description: '**Who:** the member themself or a holder of `member.manage`; `national_id` and
+        `share_capital` only by a holder of `member.manage` (403 otherwise: a member who could set their own
+        ID could probe which numbers other members hold). Send any of `full_name` (2 to 120 letters, spaces, `''`
+        `.` `-`), `national_id` (7 or 8 digits, unique within the SACCO), `gender` (`female`, `male`,
+        `other`), `date_of_birth` (`YYYY-MM-DD`, 1900 to today), `share_capital` (whole minor units, zero
+        or more). `null` or an empty string clears a field. Every field is optional. Setting a personal
+        detail needs the member''s own active consent (409 `CONSENT_REQUIRED`); clearing one and
+        `share_capital` do not. Audited as `member.profile_update` with the field names only.
+
+
+        **Rate limit:** 30 per minute.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                full_name: {type: string, nullable: true}
+                national_id: {type: string, nullable: true}
+                gender: {type: string, enum: [female, male, other], nullable: true}
+                date_of_birth: {type: string, format: date, nullable: true}
+                share_capital: {type: integer, minimum: 0, nullable: true}
+      responses:
+        '200':
+          description: The updated profile (same shape as GET).
+        '400':
+          description: Unknown field, no field, or a bad value (`validation_error`, `error.fields`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: '`CONSENT_REQUIRED`, or the national ID is already used by another member of this SACCO.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos/{sacco_id}/deposit-controls:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: The SACCO's deposit-control thresholds
+      description: '**Who:** `sacco.update` or `report.view`. Returns the thresholds in force (the defaults
+        when none are saved) and `defaults`. Amounts are minor units.
+
+
+        **Rate limit:** read limit.'
+      responses:
+        '200':
+          description: '`{auto_confirm_limit, large_amount_limit, manual_flag_limit, repeat_count, repeat_window_hours, quick_withdrawal_hours, defaults}`.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security:
+      - bearerAuth: []
+    put:
+      summary: Change the deposit-control thresholds
+      description: '**Who:** `sacco.update` (the SACCO admin). Send any of the settings; the rest keep their
+        value. `auto_confirm_limit` (0 to 500000, default 0: every deposit waits for an officer; a
+        deposit at or under it, with no flag, posts at once after a paid M-Pesa prompt),
+        `large_amount_limit` (100 to 20000000, default 10000000), `manual_flag_limit` (100 to 5000000, default 2000000),
+        `repeat_count` (2 to 20, default 3), `repeat_window_hours` (1 to 720, default 24),
+        `quick_withdrawal_hours` (1 to 720, default 24). The large-amount flag also adds up a member''s payments over `repeat_window_hours`, so splitting does not avoid it. Audited as
+        `deposit_controls.set`, and the officers are emailed.
+
+
+        **Rate limit:** write limit.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                auto_confirm_limit: {type: integer}
+                large_amount_limit: {type: integer}
+                manual_flag_limit: {type: integer}
+                repeat_count: {type: integer}
+                repeat_window_hours: {type: integer}
+                quick_withdrawal_hours: {type: integer}
+      responses:
+        '200':
+          description: The thresholds now in force.
+        '400':
+          description: An unknown key, or a value out of range.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos/{sacco_id}/flagged-payments:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: The audit report of flagged payments
+      description: '**Who:** `report.view` (SACCO admin, finance officer, secretary). The newest 200 payment
+        requests that carry a flag, with who gave the first and the second approval. `labels` maps a flag
+        code to its plain-language name.
+
+
+        **Rate limit:** read limit.'
+      responses:
+        '200':
+          description: '`{items: [{id, member, kind, source, amount_minor, mpesa_receipt, flags, status, first_approved_by, second_approved_by, decided_by, ledger_transaction_id, created_at}], labels}`.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos/{sacco_id}/reconciliation:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: The ledger against the STK records
+      description: '**Who:** `report.view`. Compares every paid STK push with the deposit it produced and
+        lists what does not match (`mismatches`, each with a `kind`: `paid_not_recorded`,
+        `amount_differs`, `paid_but_rejected`, `paid_not_credited` (paid over a day ago, still
+        unconfirmed), `ledger_missing`, `ledger_amount_differs`, `credit_reversed`, `no_paid_push`).
+        `unverified_manual` lists manual receipts no callback has matched: not a mismatch, because a
+        member may pay the paybill directly. Nothing is changed; the ledger is never edited. Audited as
+        `ledger.reconcile_mpesa`.
+
+
+        **Rate limit:** read limit.'
+      responses:
+        '200':
+          description: '`{checked, ok, mismatches, unverified_manual}`.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos/{sacco_id}/daraja-settings:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: Whether this SACCO has its own Daraja credentials saved
+      description: '**Who:** `sacco.update` (the SACCO admin). Off by default: with `DARAJA_ENABLED` unset this
+        route answers 404. Returns `{configured: false}` or `{configured: true, shortcode, updated_at}`.
+        The secrets are never returned.
+
+
+        **Rate limit:** read limit.'
+      responses:
+        '200':
+          description: '`{configured, shortcode?, updated_at?}`.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security:
+      - bearerAuth: []
+    put:
+      summary: Save this SACCO's own Daraja credentials (encrypted at rest)
+      description: '**Who:** `sacco.update` (the SACCO admin). Off by default (404). Send `shortcode` (5 to 7
+        digits: the paybill, or the head-office number of a till), `consumer_key`, `consumer_secret` and
+        `passkey` (printable, no spaces). They are stored encrypted with `DARAJA_ENCRYPTION_KEY` and never
+        returned or logged; the audit row (`daraja.credentials_set`) names the fields, not the values.
+        Saving again replaces them. Answers 503 if the encryption key is not set. In production these are the only credentials a push can use.
+
+
+        **Rate limit:** write limit.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                shortcode: {type: string, example: '600123'}
+                consumer_key: {type: string}
+                consumer_secret: {type: string}
+                passkey: {type: string}
+              required: [shortcode, consumer_key, consumer_secret, passkey]
+      responses:
+        '200':
+          description: '`{configured: true, shortcode}`.'
+        '400':
+          description: A field is missing or not valid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: '`DARAJA_ENCRYPTION_KEY` is not set, so nothing can be saved.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos/{sacco_id}/stk-push:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    post:
+      summary: Ask M-Pesa to prompt my phone
+      description: '**Who:** an active member (`savings.request`). **Off by default:** with
+        `DARAJA_ENABLED` unset this route answers 404 as if it did not exist. `DARAJA_ENV` picks Safaricom''s
+        sandbox (default) or live API; a production app starts with Daraja on only for `DARAJA_ENV=production`
+        (see `docs/deployment-checklist.md`). Send `amount` (minor units, whole shillings, KES 1 to KES 150,000) and
+        `phone` (07.., 01.. or 254..). At most 3 prompts may wait per member (429). The member then enters their M-Pesa PIN on the phone. Nexora holds no
+        funds: a paid answer becomes a pending deposit that an officer confirms (or that posts at once
+        under the SACCO''s auto-confirm limit, if it set one).
+
+
+        The prompt uses the SACCO''s own saved Daraja credentials (see `daraja-settings`); in the
+        sandbox, with none saved, the environment''s shared sandbox keys. **In production there is no
+        fallback:** a SACCO with no saved credentials answers 409, and the approved pay-in details must
+        exist and, for a paybill, match the saved shortcode (409 otherwise). If the live pay-in is a till (`mpesa_type` `till`) the request is
+        `CustomerBuyGoodsOnline` to that till; a paybill is `CustomerPayBillOnline`. A SACCO that takes
+        Pochi la Biashara (`pochi`) is record only: the route answers 409. A SACCO with no usable
+        credentials also answers 409.
+
+
+        **Rate limit:** money limit.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount: {type: integer, example: 10000}
+                phone: {type: string, example: '0712345678'}
+              required: [amount, phone]
+      responses:
+        '201':
+          description: '`{id, status: pending, amount, phone_last3, message, created_at}`.'
+        '400':
+          description: Bad amount or phone (`validation_error`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Pochi la Biashara is record only, or the SACCO has no usable M-Pesa credentials.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: M-Pesa did not answer or refused. The attempt is recorded as `failed`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos/{sacco_id}/stk-push/{push_id}:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    - name: push_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    get:
+      summary: The answer to one STK push
+      description: '**Who:** the member who asked, or a holder of `member.manage`; anyone else gets 404.
+        `status` is `pending`, `succeeded` or `failed`. 404 while the feature is off.
+
+
+        **Rate limit:** 120 per minute.'
+      responses:
+        '200':
+          description: '`{id, status, amount, phone_last3, message, created_at}`.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security:
+      - bearerAuth: []
+  /api/v1/daraja/callback/{token}:
+    parameters:
+    - name: token
+      in: path
+      required: true
+      schema:
+        type: string
+    post:
+      summary: Safaricom's answer to an STK push
+      description: 'Called by Safaricom, not by the app. The unguessable `token` in the path is the only
+        secret (`DARAJA_CALLBACK_TOKEN`); a wrong token is 404. Always acknowledges with
+        `{ResultCode: 0}`, even for an unknown or repeated answer, and changes nothing for those. A
+        success whose amount differs from the request is recorded as `failed`; a paid one creates a pending
+        deposit for an officer (see `deposit-controls`). 404 while the feature is off.'
+      responses:
+        '200':
+          description: Acknowledged.
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/saccos/{sacco_id}/settings:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: The SACCO's loan rules
+      description: '**Who:** any active member of the SACCO (`sacco.view`), or the platform owner. Defaults are returned
+        until the owner changes them.'
+      responses:
+        '200':
+          description: Current settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+    patch:
+      summary: Change the SACCO's loan rules
+      description: '**Who:** platform owner only. Send any of the fields; whole numbers only.'
+      responses:
+        '200':
+          description: Updated settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settings'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                loan_cap:
+                  type: integer
+                  minimum: 0
+                savings_multiple:
+                  type: integer
+                  minimum: 0
+                join_code_ttl_minutes:
+                  type: integer
+                  minimum: 1
+                  maximum: 1440
+                required_approvals:
+                  type: integer
+                  minimum: 1
+                  maximum: 2
+  /api/v1/loans/saccos/{sacco_id}:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: Loans in a SACCO, newest first
+      description: '**Who:** any active member. Officers (`loan.view`) see every loan; a member sees only
+        their own.'
+      parameters:
+      - $ref: '#/components/parameters/page'
+      - $ref: '#/components/parameters/per_page'
+      responses:
+        '200':
+          description: A page of loans.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  loans:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Loan'
+                  page:
+                    type: integer
+                  per_page:
+                    type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+    post:
+      summary: Request a loan
+      description: '**Who:** an active member with a savings account (`loan.request`). One open loan per
+        member (409). Within both the SACCO cap and the savings multiple the loan needs 1 approval; above
+        either it needs the SACCO''s `required_approvals` (a cap of 0 sends every loan there). The count is
+        frozen on the loan. Optional `sector` (one of the Loan `sector` values; null or empty means not
+        given) and `disclosure_acknowledged` (true records `disclosure_acknowledged_at`); anything else is
+        400. Neither is required.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                principal: {type: integer, description: Minor units.}
+                term_months: {type: integer, minimum: 1, maximum: 360}
+                sector: {type: string, nullable: true}
+                disclosure_acknowledged: {type: boolean}
+              required: [principal, term_months]
+      responses:
+        '201':
+          description: The new loan, status `requested`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                principal:
+                  type: integer
+                  minimum: 1
+                  description: Minor units.
+                term_months:
+                  type: integer
+                  minimum: 1
+                  maximum: 360
+              required:
+              - principal
+              - term_months
+  /api/v1/loans/{loan_id}:
+    parameters:
+    - $ref: '#/components/parameters/loan_id'
+    get:
+      summary: One loan with its decisions
+      description: '**Who:** the borrower, or an officer of the SACCO (`loan.view`). Anyone else gets 404.'
+      responses:
+        '200':
+          description: The loan, plus a `decisions` list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+  /api/v1/loans/{loan_id}/decisions:
+    parameters:
+    - $ref: '#/components/parameters/loan_id'
+    post:
+      summary: Approve or reject one step
+      description: '**Who:** loans officer (`loan.approve`; a SACCO admin never approves), never the borrower, and a different
+        officer for each step. Steps go in order; the last required approval sets `approved`, a rejection
+        ends the loan.'
+      responses:
+        '201':
+          description: The loan after the decision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                step:
+                  type: integer
+                  minimum: 1
+                decision:
+                  type: string
+                  enum:
+                  - approve
+                  - reject
+                reason:
+                  type: string
+                  maxLength: 500
+                  description: Required for a rejection.
+              required:
+              - step
+              - decision
+  /api/v1/loans/{loan_id}/disbursements:
+    parameters:
+    - $ref: '#/components/parameters/loan_id'
+    post:
+      summary: Pay out an approved loan
+      description: '**Who:** finance officer (`loan.disburse`) who approved no step (`LOAN_SAME_OFFICER`).
+        Credits the principal to the borrower''s savings account. The ledger row cannot be reversed. In a SACCO with published rules the cap and the pool are checked again at payout under the SACCO lock (409 `LOAN_OVER_CAP`, `LOAN_POOL_SHORT`).'
+      responses:
+        '201':
+          description: The loan, status `disbursed`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reference:
+                  type: string
+                  pattern: ^[A-Za-z0-9._:-]{1,64}$
+                  description: Required idempotency key, unique per SACCO.
+              required:
+              - reference
+  /api/v1/loans/{loan_id}/repayments:
+    parameters:
+    - $ref: '#/components/parameters/loan_id'
+    post:
+      summary: Repay a disbursed loan from savings
+      description: '**Who:** the borrower, or a finance officer. Debits the borrower''s savings account;
+        the loan becomes `repaid` when the principal is covered. The ledger row cannot be reversed.'
+      responses:
+        '201':
+          description: The repayment.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  repayment_id:
+                    type: integer
+                  loan_id:
+                    type: integer
+                  transaction_id:
+                    type: integer
+                  amount:
+                    type: integer
+                  repaid_total:
+                    type: integer
+                  loan_status:
+                    type: string
+                  account_balance:
+                    type: integer
+                  reference:
+                    type: string
+                  created_at:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount:
+                  type: integer
+                  minimum: 1
+                  description: Minor units. Integers only.
+                reference:
+                  type: string
+                  pattern: ^[A-Za-z0-9._:-]{1,64}$
+                  description: Required idempotency key, unique per SACCO.
+              required:
+              - amount
+              - reference
+  /api/v1/admin/owners:
+    get:
+      summary: List the platform owners
+      description: '**Who:** platform owner only.'
+      responses:
+        '200':
+          description: Every active platform owner.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  owners:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Owner'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      security:
+      - bearerAuth: []
+    post:
+      summary: Make a registered user a platform owner
+      description: '**Who:** platform owner only. The user must have verified their email (409) and not be an
+        owner already (409).'
+      responses:
+        '201':
+          description: The new owner.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Owner'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  maxLength: 255
+              required:
+              - email
+  /api/v1/admin/owners/{user_id}:
+    parameters:
+    - name: user_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    delete:
+      summary: Revoke a platform owner
+      description: '**Who:** platform owner only. Nobody revokes themselves (403); at least two owners always
+        remain (409). The revoked owner loses platform access on their next request.'
+      responses:
+        '200':
+          description: The owners that remain.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  owners:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Owner'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+      security:
+      - bearerAuth: []
+  /api/v1/members/me/saccos:
+    get:
+      summary: Every SACCO I belong to
+      description: '**Who:** any signed-in user. One login covers every SACCO: a SACCO-scoped request
+        names its SACCO, and the membership is checked again on every request (no re-login to switch).
+        A suspended SACCO is listed with `status: suspended`.'
+      responses:
+        '200':
+          description: My SACCOs, by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  saccos:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        name:
+                          type: string
+                        status:
+                          type: string
+                          enum:
+                          - active
+                          - suspended
+                        currency:
+                          type: string
+                        membership_id:
+                          type: integer
+                        membership_status:
+                          type: string
+                          enum:
+                          - invited
+                          - active
+                          - inactive
+                        roles:
+                          type: array
+                          items:
+                            type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      security:
+      - bearerAuth: []
+  /api/v1/saccos/{sacco_id}/support-access:
+    parameters:
+    - $ref: '#/components/parameters/sacco_id'
+    get:
+      summary: Support-access requests for a SACCO, newest first
+      description: '**Who:** the SACCO''s admin, or a platform owner. Approvals whose time is up are shown
+        as expired.'
+      responses:
+        '200':
+          description: The requests.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SupportAccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security:
+      - bearerAuth: []
+    post:
+      summary: Ask to read one scope of a SACCO's data
+      description: '**Who:** a platform owner. A platform owner reads SACCO data (audit, members, savings,
+        loans) only through an approved grant for that scope, read-only, while it lasts (at most 24
+        hours). Every read under a grant writes an audit row with the grant id. There is no bypass.'
+      responses:
+        '201':
+          description: The request, status `requested`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupportAccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+                scope:
+                  type: string
+                  enum:
+                  - audit
+                  - members
+                  - savings
+                  - loans
+              required:
+              - reason
+              - scope
+  /api/v1/support-access/{request_id}/approve:
+    parameters:
+    - $ref: '#/components/parameters/request_id'
+    post:
+      summary: Approve a support-access request
+      description: '**Who:** an active admin of the request''s SACCO, never the requester. Sets the expiry 1 to 24 hours ahead.'
+      responses:
+        '200':
+          description: The request after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupportAccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+      security:
+      - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                hours:
+                  type: integer
+                  minimum: 1
+                  maximum: 24
+                  default: 4
+  /api/v1/support-access/{request_id}/deny:
+    parameters:
+    - $ref: '#/components/parameters/request_id'
+    post:
+      summary: Deny a support-access request
+      description: '**Who:** an active admin of the request''s SACCO, never the requester.'
+      responses:
+        '200':
+          description: The request after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupportAccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+      security:
+      - bearerAuth: []
+  /api/v1/support-access/{request_id}/revoke:
+    parameters:
+    - $ref: '#/components/parameters/request_id'
+    post:
+      summary: Revoke an approved grant at any time
+      description: '**Who:** an active admin of the request''s SACCO, never the requester.'
+      responses:
+        '200':
+          description: The request after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupportAccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+      security:
+      - bearerAuth: []
+  /api/v1/assistant/chat:
+    post:
+      summary: Ask the help assistant
+      description: '**Who:** anyone. Send a Bearer token to let the assistant see the caller''s own SACCOs
+        and balances; without one it answers from the FAQ only.
+
+
+        **Rate limit:** 10 per minute and 30 per day per IP, 20 per hour per person, and a shared daily
+        cap (`ASSISTANT_DAILY_CAP`).
+
+
+        Nothing is stored. The model gets no ids or email, only the question, the FAQ and the caller''s
+        own SACCO names, roles, statuses and balances. Answers can be wrong: the page is the official
+        figure. Needs `GEMINI_API_KEY`; without it the route answers 503.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message:
+                  type: string
+                  maxLength: 500
+                history:
+                  type: array
+                  maxItems: 6
+                  items:
+                    type: object
+                    properties:
+                      role:
+                        type: string
+                        enum:
+                        - user
+                        - assistant
+                      text:
+                        type: string
+                        maxLength: 1200
+              required:
+              - message
+      responses:
+        '200':
+          description: The assistant's plain-text answer.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reply:
+                    type: string
+                  signed_in:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: A Bearer token was sent but is invalid or expired (`unauthorized`). No header at all
+            is an anonymous call, not an error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: '`assistant_busy` (the free daily limit is used up) or `assistant_unavailable` (no
+            key, timeout or provider error). The message is generic.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
